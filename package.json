@@ -1,0 +1,31 @@
+{
+    "name": "@thierryteisseire/leadgenius-hubspot",
+    "version": "1.0.0",
+    "description": "HubSpot ↔ LeadGenius Skill — Export leads from LeadGenius and import them into HubSpot with custom AI fields, schema creation, rate-limit bypassing, and automated scripts.",
+    "main": "SKILL.md",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/thierryteisseire/leadgenius-hubspot.git"
+    },
+    "keywords": [
+        "agent-skill",
+        "hubspot",
+        "leadgenius",
+        "ai-agent",
+        "lead-import",
+        "crm",
+        "data-migration",
+        "revops"
+    ],
+    "author": "Thierry Teisseire",
+    "license": "MIT",
+    "bugs": {
+        "url": "https://github.com/thierryteisseire/leadgenius-hubspot/issues"
+    },
+    "homepage": "https://github.com/thierryteisseire/leadgenius-hubspot#readme",
+    "files": [
+        "SKILL.md",
+        "scripts/",
+        "README.md"
+    ]
+}
