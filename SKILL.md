@@ -18,9 +18,11 @@ description: Use this skill whenever the user asks to import, sync, migrate, or 
 4. [LeadGenius JSON Field Reference](#4-leadgenius-json-field-reference)
 5. [Creating Custom Properties inside HubSpot](#5-creating-custom-properties-inside-hubspot)
 6. [Importing Contacts & Data Mapping](#6-importing-contacts--data-mapping)
+6.5. [Companies & Primary Associations (required for a complete import)](#65-companies--primary-associations)
 7. [Creating Saved Views (For SDRs)](#7-creating-saved-views-for-sdrs)
 8. [Complete Automated Execution](#8-complete-automated-execution)
 9. [Troubleshooting](#9-troubleshooting)
+10. [Verification Checklist](#10-verification-checklist)
 
 ---
 
@@ -29,10 +31,21 @@ description: Use this skill whenever the user asks to import, sync, migrate, or 
 ### What This Does
 
 ```text
-LeadGenius Automation API  →  HubSpot Contacts Database
- Over 120 nested objects       Native Custom CRM Properties
-  Full X-Admin-Key Bypass      Property Group (LeadGenius AI)
+LeadGenius Automation API  →  HubSpot Contacts + Companies + Associations
+ Over 120 nested objects       Native Custom CRM Properties (lg_*)
+  Full X-Admin-Key Bypass      Property Group + correct PRIMARY company link
 ```
+
+### ⚠️ The one rule that prevents data corruption
+
+> **HubSpot batch endpoints do NOT return results in input order.** Never pair a contact to
+> a company by list index. Always correlate each batch result to its input by a key the API
+> echoes back (email, unique id, company domain), and build associations via map lookups.
+
+Pairing `contacts[i]` with `companies[i]` from two separate batch calls previously attached
+contacts to the **wrong** company and marked it primary (~10,400 contacts, ~8,000 junk
+companies on one portal). The company/association script here is built to avoid this; see
+`references/companies-and-associations.md`.
 
 ### Architecture
 
@@ -74,9 +87,14 @@ Create a local `.env` file at the root of your execution directory securely:
 LGP_API_KEY=your_standard_lg_token
 LGP_MASTER_KEY=your_admin_bypass_token
 
-# HubSpot
-HUBSPOT_API_KEY=your_private_app_bearer_token
+# HubSpot — the scripts read HUBSPOT_ACCESS_TOKEN (HUBSPOT_API_KEY and a
+# `hubspot-app=` line are also accepted as fallbacks for compatibility).
+HUBSPOT_ACCESS_TOKEN=your_private_app_bearer_token
 ```
+
+> The HubSpot private app also needs company + association scopes to create company objects
+> and links: add `crm.objects.companies.read`, `crm.objects.companies.write`, and
+> `crm.objects.contacts` association permissions (see §2).
 
 ---
 
@@ -93,6 +111,10 @@ In order to seamlessly authorize interactions with your Hubspot infrastructure, 
    - `crm.objects.contacts.write`
    - `crm.schemas.contacts.read`
    - `crm.schemas.contacts.write`
+   - `crm.objects.companies.read`
+   - `crm.objects.companies.write`
+   - `crm.schemas.companies.read`
+   - `crm.schemas.companies.write`
 6. Click **Create app** and securely port your new Access Token directly to `HUBSPOT_API_KEY` in your `.env`.
 
 ---
@@ -226,6 +248,37 @@ response = requests.post(
 
 ---
 
+## 6.5. Companies & Primary Associations
+
+Upserting contacts alone leaves each contact with a `company` **text field** but no company
+object and no link — so company-level views, scoring, and ownership don't work. Run the
+company step to create companies and set the correct **primary** association.
+
+```bash
+# after contacts are imported (lg_to_hs.py)
+python3 scripts/lg_companies_associations.py <file.csv>
+```
+
+What it guarantees:
+
+- Companies deduped by **domain** (`lg_company_key = "domain:<domain>"`), name only as a
+  fallback — no duplicate-company explosion.
+- Each contact associated to its company and that company set **primary**
+  (`associationTypeId 1`) via an **idempotent** `PUT`.
+- Results correlated by **echoed key** (email / company key), never by list index.
+- Safe to re-run: a clean second run prints `associations set primary: 0 (unchanged=N)`.
+
+> **Audit against the company domain, not the email domain.** Subsidiaries/local entities
+> legitimately differ (an `@schueco.com` contact belongs to `Schüco France` / `schuco.fr`).
+
+If the portal is **already corrupted** (contacts show wrong/multiple companies), do not just
+re-import — follow `references/remediation-playbook.md` first (flip primary → remove
+parasite links → fix never-associated → archive orphan companies, all reversible).
+
+Full rationale and endpoints: `references/companies-and-associations.md`.
+
+---
+
 ## 7. Creating Saved Views (For SDRs)
 
 UI Saved Layouts cannot be programmatically initiated via Standard Endpoints securely. Administrators must instruct internal teams utilizing the following manual pipeline layout configurations:
@@ -259,4 +312,42 @@ python3 scripts/lg_full_to_hs.py
 | `PROPERTY_DOESNT_EXIST` | Script failed to setup custom Schema. | Wipe memory cache and rerun step 1 property validation. |
 | `KeyError: 'data'` | The LeadGenius script failed to use `X-Admin-Key` properly. | Verify the `LGP_MASTER_KEY` is fully established in standard `.env`. |
 | Zero Properties Imported | The Batch API failed matching standard fields. | Ensure array targets the CRM Endpoint Native Field Identifier mapping (`email`). |
-| `HTTP 429` | Reverted to Standard LeadGenius Limits. | Confirm bypass admin keys are pushed exactly as `X-Admin-Key`. |
+| `HTTP 429 (HubSpot)` | Too many calls in the 10s rolling window. | The scripts self-throttle to ~0.15s/call and retry with backoff; lower concurrency if you add parallelism. |
+| `HTTP 429 (LeadGenius)` | Reverted to Standard LeadGenius Limits. | Confirm bypass admin keys are pushed exactly as `X-Admin-Key`. |
+| Contacts linked to the **wrong company** / marked primary | Batch results paired by list index (order not guaranteed). | Use `lg_companies_associations.py`, which correlates by echoed key. Never pair `contacts[i]`↔`companies[i]`. |
+| Contacts have **2–3 companies** after re-running | Association step not idempotent; re-run added links. | The company script checks the current primary and skips if correct; archive extras per `remediation-playbook.md`. |
+| Thousands of **domainless duplicate** companies | Company keyed by name only. | Dedup by domain (`lg_company_key = "domain:<domain>"`); name only when no domain. |
+| Audit shows "WRONG" but company looks right | Audited against email domain, not company domain. | Compare to the row's Company Domain; subsidiaries/local entities differ legitimately. |
+| `401 Unauthorized` on companies/associations | Private app missing company/association scopes. | Add `crm.objects.companies.*` and association scopes (see §2). |
+
+---
+
+## 10. Verification Checklist
+
+Always run on a small slice first, verify, then the full import.
+
+```bash
+python3 scripts/lg_to_hs.py <file.csv>                       # contacts
+python3 scripts/lg_companies_associations.py <file.csv>      # companies + primary links
+python3 scripts/lg_companies_associations.py <file.csv>      # re-run: must be idempotent
+python3 scripts/hs_audit_primary.py <file.csv> --limit 100   # audit
+```
+
+Confirm:
+
+- [ ] Each contact with a corporate email has exactly **one** primary company
+      (`associationTypeId 1`).
+- [ ] The primary company matches the row's **Company Domain** (not the email domain).
+- [ ] Re-running the company step changes nothing (`set primary: 0, unchanged=N`).
+- [ ] Companies created ≈ distinct employers, not ≈ one per contact.
+- [ ] `hs_audit_primary.py` reports `WRONG: 0` (ignoring legitimate subsidiary-domain cases).
+
+### Bundled scripts & references
+
+| File | Purpose |
+|---|---|
+| `scripts/lg_to_hs.py` | Upsert contacts + `lg_*` properties (idempotent by email). |
+| `scripts/lg_companies_associations.py` | Create companies, set correct primary association (idempotent, key-correlated). |
+| `scripts/hs_audit_primary.py` | Audit primary company vs. source. |
+| `references/companies-and-associations.md` | Why/how associations are done safely (root cause). |
+| `references/remediation-playbook.md` | Repair an already-corrupted portal (reversible). |
